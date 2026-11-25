@@ -1,0 +1,23 @@
+[Unit]
+Description=Collect native quota summaries
+After=network.target
+RequiresMountsFor=@HOME@/.local/share/quota-desk
+
+[Service]
+Type=oneshot
+User=@ACCOUNT@
+WorkingDirectory=/usr/local/lib/quota-desk-native
+Environment=QUOTA_DESK_HOME=@HOME@/.local/share/quota-desk
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /usr/local/lib/quota-desk-native/state.py collect
+TimeoutStartSec=4min
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindPaths=@HOME@/.local/share/quota-desk
+InaccessiblePaths=-@HOME@/.ssh -/usr/bin/sudo
+UnsetEnvironment=SSH_AUTH_SOCK SSH_AGENT_PID
+CapabilityBoundingSet=
+ReadWritePaths=@HOME@/.local/share/quota-desk

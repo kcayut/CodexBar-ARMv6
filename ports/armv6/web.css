@@ -1,0 +1,35 @@
+:root{font-family:Inter,-apple-system,BlinkMacSystemFont,"PingFang TC",sans-serif;color:#191c1a;background:white;color-scheme:light}
+*{box-sizing:border-box}
+body{margin:0}
+header{padding:0 3vw;height:62px;border-bottom:1px solid #c3c8c5;display:flex;align-items:center;justify-content:space-between}
+header b{font-size:1.45rem;letter-spacing:-.035em}
+main{width:min(90%,860px);margin:34px auto 50px}
+h1{text-align:center;font-size:clamp(2rem,4vw,3.1rem);line-height:1.25;margin:12px 0}
+h2{margin:0 0 6px;font-size:1.35rem}
+p{color:#505953;line-height:1.6;margin:5px 0}
+.intro{text-align:center;margin-bottom:28px}
+article{display:flex;justify-content:space-between;align-items:center;gap:18px;padding:18px 5px;border-bottom:1px solid #c3c8c5}
+.actions,.add{display:flex;align-items:center;flex-wrap:wrap;gap:16px}
+form{margin:0}
+label{display:grid;gap:5px;font-weight:550}
+input,select,button{font:inherit}
+input,select{border:1px solid #99a59d;border-radius:6px;background:#fafbfa;padding:10px;width:100%;min-width:0}
+button{cursor:pointer;border:none;border-radius:6px;background:#145337;color:#fff;font-weight:650;padding:10px 22px;min-height:40px}
+button:hover{background:#0e4029}
+a,summary,.text{font:inherit;color:#235b40;text-decoration:underline;text-underline-offset:3px;cursor:pointer}
+.text,.text:hover{background:none;padding:5px 2px}
+.danger{color:#953a24}
+.metrics{color:#21563d;overflow-wrap:anywhere}
+.extra{margin-top:28px}
+.add{align-items:end;margin:16px 0}
+.add label{flex:1;max-width:420px}
+.auth{margin:8vh auto;max-width:420px}
+.auth h1{text-align:left;font-size:2.15rem;margin-bottom:20px}
+.auth form{display:grid;gap:14px}
+.auth p{margin:12px 0}
+.auth.account{margin-top:28px}
+.notice{padding:10px 14px;background:#edf5f0;border-left:3px solid #257349}
+[role=alert]{color:#923c23}
+[role=alert]:empty{display:none}
+:focus-visible{outline:3px solid #086852;outline-offset:3px}
+@media(max-width:570px){article{display:block}.actions{margin-top:8px}main{margin-top:25px}.auth{margin-top:7vh}}

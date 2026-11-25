@@ -1,0 +1,10 @@
+[Unit]
+Description=Collect native quota summaries every five minutes
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=5min
+AccuracySec=3s
+
+[Install]
+WantedBy=timers.target
