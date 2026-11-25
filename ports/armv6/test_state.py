@@ -5,6 +5,7 @@ import time
 import unittest
 from unittest.mock import patch
 
+import device_settings
 import providers
 import receive
 from state import Store
@@ -73,6 +74,86 @@ class StateTest(unittest.TestCase):
             store.collect()
             fetch.assert_not_called()
         self.assertEqual(store.list_accounts()[0]["status"], "stale")
+
+    def test_idle_tick_after_failure_does_not_query_or_write(self):
+        store = Store(self.home)
+        store.set_account("deepseek", "test")
+        with patch("receive.boot_id", return_value="boot"), patch("state.time.monotonic") as clock, \
+                patch("providers.fetch", side_effect=providers.ProviderError("連線失敗")) as fetch:
+            clock.return_value = 100
+            self.assertTrue(store.collect(scheduled=True))
+            fetch.assert_called_once()
+            files = {p: p.stat().st_mtime_ns for p in self.home.iterdir()}
+            self.assertEqual(store.collect_lock.stat().st_mode & 0o777, 0o600)
+            clock.return_value = 160
+            # An NTP clock step must not cause another provider request in the same boot.
+            with patch("state.time.time", return_value=self.now + 86400):
+                self.assertFalse(Store(self.home).collect(scheduled=True))
+            fetch.assert_called_once()
+            self.assertEqual(files, {p: p.stat().st_mtime_ns for p in self.home.iterdir()})
+
+    def test_live_interval_changes_manual_start_and_reboot(self):
+        store = Store(self.home)
+        store.set_account("deepseek", "test")
+        with patch("state.time.monotonic") as clock, patch("state.time.time") as wall, \
+                patch("receive.boot_id") as boot, patch("providers.fetch", return_value=self.balance) as fetch:
+            boot.return_value = "first"
+            def tick(seconds, scheduled=True):
+                clock.return_value = seconds
+                wall.return_value = self.now + seconds
+                return store.collect(scheduled=scheduled)
+            self.assertTrue(tick(100))
+            device_settings.save(self.home, "Asia/Taipei", "zh-Hant", 1)
+            self.assertFalse(tick(130))
+            self.assertTrue(tick(160))
+            device_settings.save(self.home, "Asia/Taipei", "zh-Hant", 60)
+            self.assertFalse(tick(760))
+            self.assertTrue(tick(761, scheduled=False))
+            self.assertFalse(tick(801))
+            boot.return_value = "second"
+            clock.return_value = 30
+            wall.return_value = self.now + 820
+            self.assertTrue(store.collect(scheduled=True))
+            self.assertEqual(fetch.call_count, 4)
+
+    def test_early_minute_tick_waits_only_until_due(self):
+        store = Store(self.home)
+        store.set_account("deepseek", "test")
+        with patch("state.time.monotonic") as clock, patch("state.time.time") as wall, \
+                patch("receive.boot_id", return_value="boot"), patch("providers.fetch", return_value=self.balance) as fetch:
+            wall.return_value = self.now
+            clock.return_value = 100
+            self.assertTrue(store.collect(scheduled=True))
+            clock.return_value = 398.5
+            wall.return_value = self.now + 298.5
+            def advance(seconds):
+                clock.return_value += seconds
+                wall.return_value += seconds
+            with patch("state.time.sleep", side_effect=advance) as sleep:
+                self.assertTrue(store.collect(scheduled=True))
+                sleep.assert_called_once_with(1.5)
+            self.assertEqual(fetch.call_count, 2)
+            self.assertEqual(json.loads((self.home / "last-attempt.json").read_bytes())["monotonic"], 400)
+
+    def test_parallel_manual_collection_skips_an_active_attempt(self):
+        store = Store(self.home)
+        store.set_account("deepseek", "test")
+        def other_collection(provider, secret):
+            self.assertFalse(Store(self.home).collect())
+            return self.balance
+        with patch("providers.fetch", side_effect=other_collection) as fetch:
+            self.assertTrue(store.collect(scheduled=True))
+            fetch.assert_called_once()
+
+    def test_staleness_tracks_configured_interval(self):
+        store = Store(self.home)
+        store.set_account("deepseek", "test")
+        with patch("state.time.time", return_value=self.now), patch("providers.fetch", return_value=self.balance):
+            store.collect()
+        with patch("state.time.time", return_value=self.now + 1200):
+            self.assertEqual(store.list_accounts()[0]["status"], "stale")
+            device_settings.save(self.home, "Asia/Taipei", "zh-Hant", 10)
+            self.assertEqual(store.list_accounts()[0]["status"], "ok")
 
 if __name__ == "__main__":
     unittest.main()

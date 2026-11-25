@@ -9,6 +9,7 @@ import time
 import unittest
 from unittest.mock import patch
 from contextlib import redirect_stderr
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -143,6 +144,62 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.request("/setup", form)[0], 429)
         self.assertFalse((self.home / "admin-password.json").exists())
         self.assertEqual(len(web.fingerprint(self.tls / "tls.crt").split(":")), 32)
+
+    def test_device_preferences_and_localized_navigation(self):
+        form = {"timezone": "America/Los_Angeles", "language": "en", "interval": "30"}
+        self.assertEqual(self.request("/settings", form)[0], 403)
+        self.assertEqual(self.request("/settings")[2]["Location"], "/setup")
+        password = "only-for-this-test"
+        code = web.issue_setup_code(self.home)
+        result, _, headers = self.request("/setup", {"code": code, "password": password, "confirm": password})
+        self.assertEqual(result, 303)
+        self.cookie = headers["Set-Cookie"].split(";", 1)[0]
+        self.assertIn('href="/settings" aria-current="page">本機設定', self.request("/settings")[1])
+        self.assertEqual(self.request("/settings", form, Origin="null")[0], 403)
+        self.assertEqual(self.request("/settings", {**form, "timezone": "../wrong"})[0], 400)
+        self.assertEqual(web.device_settings.load(self.home)["language"], "zh-Hant")
+        status, _, headers = self.request("/settings", form)
+        self.assertEqual(status, 303)
+        view = self.request(headers["Location"])[1]
+        self.assertIn('lang="en"', view)
+        self.assertIn('role="status">Device settings saved.', view)
+        self.assertIn('value="30" selected', view)
+        self.assertIn('value="America/Los_Angeles"', view)
+        self.assertIn('every 30 minutes', self.request()[1])
+        for provider, info in web.PROVIDERS.items():
+            status, body, _ = self.request("/account/" + provider)
+            self.assertEqual(status, 200)
+            self.assertIn(web.ENGLISH[info["hint"]], body)
+            self.assertNotIn(info["hint"], body)
+        self.assertIn("single-line credential", self.request("/account/deepseek", {"secret": "bad value"})[1])
+        self.assertIn("Choose a valid", self.request("/settings", {**form, "interval": "7"})[1])
+        self.request("/logout", {})
+        self.assertIn("Administrator sign-in", self.request("/settings")[1])
+        self.assertIn("credentials are incorrect", self.request("/login", {"password": "bad"})[1])
+        self.cookie = self.request("/login", {"password": password})[2]["Set-Cookie"].split(";", 1)[0]
+        self.assertIn('value="30" selected', self.request("/settings")[1])
+
+    def test_local_time_and_configured_staleness(self):
+        timestamp = int(datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc).timestamp())
+        view = web.Screens({"language": "en", "timezone": "America/Los_Angeles", "interval": 30})
+        row = {"provider": "codex", "configured": True, "enabled": True, "status": "ok",
+               "last_success": timestamp, "error": "Google 未回報已授權的配額專案", "metrics": []}
+        with patch.object(web.time, "time", return_value=timestamp + 1200):
+            text = view.account_row(row)
+            self.assertIn("Up to date", text)
+            self.assertIn("2026/07/01 05:00 PDT", text)
+            self.assertIn("authorized quota project", text)
+        with patch.object(web.time, "time", return_value=timestamp + web.device_settings.stale_after(30)):
+            self.assertIn("Stale", view.account_row(row))
+
+    def test_one_minute_and_panel_refresh_note(self):
+        settings = {"language": "en", "timezone": "UTC", "interval": 1}
+        english = web.Screens(settings)
+        self.assertIn("every 1 minute.", english.dashboard([]))
+        self.assertIn('value="1" selected>1 minute</option>', english.settings_page())
+        self.assertIn("at least 3 minutes between refreshes", english.settings_page())
+        chinese = web.Screens({**settings, "language": "zh-Hant"})
+        self.assertIn("電子紙兩次刷新至少間隔 3 分鐘。", chinese.settings_page())
 
 
 if __name__ == "__main__":

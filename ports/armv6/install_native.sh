@@ -42,7 +42,7 @@ if [ -f "$display" ] && systemctl cat quota-desk-display.service >/dev/null 2>&1
 fi
 staging=$(mktemp -d)
 trap 'rm -rf -- "$staging"' EXIT
-for name in web.py web.css state.py providers.py receive.py display.py native_tls.py quota-desk-web.service quota-desk-collect.service quota-desk-collect.timer; do
+for name in web.py web_text.py web.css state.py providers.py receive.py device_settings.py display.py native_tls.py quota-desk-web.service quota-desk-collect.service quota-desk-collect.timer; do
     install -m 644 "$src/$name" "$staging/$name"
 done
 /usr/bin/python3 - "$staging" <<'PY'
@@ -55,7 +55,7 @@ PY
 # Create private state as its eventual owner.
 runuser -u "$account" -- /usr/bin/python3 - "$data" < "$staging/native_tls.py"
 install -d -m 755 "$dest"
-for name in web.py web.css state.py providers.py receive.py; do
+for name in device_settings.py web_text.py web.css receive.py providers.py state.py web.py; do
     install -m 644 "$staging/$name" "$dest/.$name.new"
     mv -f "$dest/.$name.new" "$dest/$name"
 done
@@ -80,10 +80,19 @@ until curl --noproxy '*' --cacert "$data/tls.crt" --fail --silent --max-time 4 -
 done
 systemctl is-active --quiet quota-desk-web.service
 systemctl is-active --quiet quota-desk-collect.timer
-if [ "$display_installed" = yes ] && ! cmp -s "$staging/display.py" "$display"; then
-    install -m 644 "$staging/display.py" "$display.new"
-    mv -f "$display.new" "$display"
-    systemctl restart quota-desk-display.service
+if [ "$display_installed" = yes ]; then
+    changed=no
+    for name in device_settings.py display.py; do
+        target=$(dirname "$display")/$name
+        if ! cmp -s "$staging/$name" "$target"; then
+            install -m 644 "$staging/$name" "$target.new"
+            mv -f "$target.new" "$target"
+            changed=yes
+        fi
+    done
+    if [ "$changed" = yes ]; then
+        systemctl restart quota-desk-display.service
+    fi
 fi
 printf '管理頁：https://%s.local:8443/\n' "$(hostname -s)"
 openssl x509 -in "$data/tls.crt" -noout -sha256 -fingerprint

@@ -16,16 +16,22 @@ import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime
+from functools import lru_cache
 from html import escape
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+from zoneinfo import ZoneInfo, available_timezones
 
 if __package__:
+    from . import device_settings
+    from .web_text import ENGLISH
     from .providers import PROVIDERS
     from .state import Store
 else:
+    import device_settings
+    from web_text import ENGLISH
     from providers import PROVIDERS
     from state import Store
 
@@ -127,79 +133,130 @@ def fingerprint(cert):
     return hashlib.sha256(der).digest().hex(":").upper()
 
 
-def page(title, content, signed_in=False):
-    logout = '<form method="post" action="/logout"><button class="text">登出</button></form>' if signed_in else ""
-    return f"""<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>{title} · Quota Desk</title>
-<link rel="stylesheet" href="/web.css"></head><body><header><b lang="en">Quota Desk</b>{logout}</header>
+@lru_cache(maxsize=1)
+def zone_options():
+    return "".join(f'<option value="{escape(name)}"></option>' for name in sorted(available_timezones())
+                   if not name.startswith(("posix/", "right/", "SystemV/")) and name not in ("localtime", "posixrules"))
+
+
+class Screens:
+    def __init__(self, preferences):
+        self.prefs = preferences
+        self.language = preferences["language"]
+
+    def text(self, source):
+        return ENGLISH.get(source, source) if self.language == "en" else source
+
+    def minutes(self, interval):
+        return self.text("1 分鐘") if interval == 1 else self.text("{interval} 分鐘").format(interval=interval)
+
+    def page(self, title, content, active=""):
+        t = self.text
+        controls = ""
+        if active:
+            links = []
+            for href, label in (("/", "訂閱管理"), ("/settings", "本機設定")):
+                current = ' aria-current="page"' if href == active else ""
+                links.append(f'<a href="{href}"{current}>{t(label)}</a>')
+            controls = (f'<nav aria-label="{t("主要導覽")}">{"".join(links)}</nav>'
+                        f'<form method="post" action="/logout"><button class="text">{t("登出")}</button></form>')
+        return f"""<!doctype html><html lang="{self.language}"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>{t(title)} · Quota Desk</title>
+<link rel="stylesheet" href="/web.css"></head><body><header><b lang="en">Quota Desk</b>{controls}</header>
 <main>{content}</main></body></html>"""
 
+    def auth_page(self, setup=False, message=""):
+        t = self.text
+        title = "設定管理密碼" if setup else "管理員登入"
+        instructions = ("請開啟瀏覽器的憑證資訊，核對 SHA-256 指紋的前 32 個十六進位字元與電子紙相同，"
+                        "再輸入電子紙上的 8 位數設定碼。也可透過已配對的 SSH 核對完整指紋並取得設定碼。")
+        if setup:
+            fields = f"""<p>{t(instructions)}</p><label>{t("一次性設定碼")}<input name="code" autocomplete="one-time-code" maxlength="128" required></label>
+<label>{t("新管理密碼（至少 12 字元）")}<input type="password" name="password" autocomplete="new-password" minlength="12" maxlength="256" required></label>
+<label>{t("再次輸入密碼")}<input type="password" name="confirm" autocomplete="new-password" maxlength="256" required></label>"""
+        else:
+            fields = f'<label>{t("管理密碼")}<input type="password" name="password" autocomplete="current-password" maxlength="256" required></label>'
+        retry = f'<p><a href="/setup">{t("重新讀取設定狀態")}</a></p>' if setup and message else ""
+        notice = f'<p role="alert">{t(message)}</p>' if message else ""
+        return self.page(title, f'<section class="auth"><h1>{t(title)}</h1>{notice}{retry}'
+                         f'<form method="post" action="{"/setup" if setup else "/login"}">{fields}'
+                         f'<button>{t("設定密碼" if setup else "登入")}</button></form></section>')
 
-def auth_page(setup=False, message=""):
-    title = "設定管理密碼" if setup else "管理員登入"
-    fields = """<p>請開啟瀏覽器的憑證資訊，核對 SHA-256 指紋的前 32 個十六進位字元與電子紙相同，
-再輸入電子紙上的 8 位數設定碼。也可透過已配對的 SSH 核對完整指紋並取得設定碼。</p>
-<label>一次性設定碼<input name="code" autocomplete="one-time-code" maxlength="128" required></label>
-<label>新管理密碼（至少 12 字元）<input type="password" name="password" autocomplete="new-password"
-minlength="12" maxlength="256" required></label>
-<label>再次輸入密碼<input type="password" name="confirm" autocomplete="new-password" maxlength="256" required></label>""" if setup else """
-<label>管理密碼<input type="password" name="password" autocomplete="current-password" maxlength="256" required></label>"""
-    action = "/setup" if setup else "/login"
-    retry = '<p><a href="/setup">重新讀取設定狀態</a></p>' if setup and message else ""
-    return page(title, f'<section class="auth"><h1>{title}</h1><p role="alert">{escape(message)}</p>{retry}'
-                f'<form method="post" action="{action}">{fields}<button>{"設定密碼" if setup else "登入"}</button></form></section>')
+    def account_form(self, provider):
+        t = self.text
+        info = PROVIDERS[provider]
+        hint = escape(t(info["hint"]))
+        name = escape(info["name"])
+        field = info["credential"]
+        if not field:
+            return self.page("服務資訊", f'<h1>{name}</h1><p>{hint}</p>', "/")
+        return self.page("設定帳號", f"""<section class="auth account"><h1>{name}</h1>
+<p>{hint}</p><form method="post" action="/account/{provider}">
+<label>{escape(t(field))}<input type="password" name="secret" required autocomplete="off"
+spellcheck="false" autocapitalize="none" maxlength="16384"></label><button>{t("儲存帳號")}</button></form></section>""", "/")
 
-
-def account_form(provider):
-    info = PROVIDERS[provider]
-    field = info["credential"]
-    link = '<a href="/">返回訂閱管理</a>'
-    if not field:
-        return page("服務資訊", f'{link}<h1>{escape(info["name"])}</h1><p>{escape(info["hint"])}</p>', True)
-    return page("設定帳號", f"""{link}<section class="auth account"><h1>{escape(info["name"])}</h1>
-<p>{escape(info["hint"])}</p><form method="post" action="/account/{provider}">
-<label>{escape(field)}<input type="password" name="secret" required autocomplete="off"
-spellcheck="false" autocapitalize="none" maxlength="16384"></label><button>儲存帳號</button></form></section>""", True)
-
-
-def account_row(row):
-    provider = row["provider"]
-    info = PROVIDERS[provider]
-    configured = row["configured"]
-    status = STATUS.get(row.get("status"), "等待擷取") if row["enabled"] or not configured else "已停用"
-    last = row.get("last_success")
-    when = datetime.fromtimestamp(last).astimezone().strftime("%Y/%m/%d %H:%M") if last else "尚無紀錄"
-    if row["enabled"] and row.get("status") == "ok" and last and time.time() - last > 900:
-        status = "已過期"
-    metrics = " · ".join(f'{escape(str(m["label"]))} {escape(str(m["value"]))}' for m in row.get("metrics", []))
-    state_action = "disable" if row["enabled"] else "enable"
-    state_label = "停用" if row["enabled"] else "啟用"
-    toggle = (f'<form method="post" action="/{state_action}/{provider}"><button class="text">{state_label}</button></form>'
-              if configured and info["credential"] else "")
-    edit = ("更新憑證" if configured else "設定憑證") if info["credential"] else "服務資訊"
-    note = escape(row.get("error") or "")
-    return f"""<article><div><h2>{escape(info["name"])}</h2><b class="metrics">{metrics}</b>
-<p>{status}　最後成功：{when}</p><p>{note}</p></div><div class="actions">
-<a href="/account/{provider}">{edit}</a>{toggle}
-<details><summary>移除</summary><form method="post" action="/remove/{provider}"><button class="text danger">確認移除帳號</button></form>
+    def account_row(self, row):
+        t = self.text
+        provider = row["provider"]
+        info = PROVIDERS[provider]
+        configured = row["configured"]
+        status = STATUS.get(row.get("status"), "等待擷取") if row["enabled"] or not configured else "已停用"
+        last = row.get("last_success")
+        zone = ZoneInfo(self.prefs["timezone"])
+        when = datetime.fromtimestamp(last, zone).strftime("%Y/%m/%d %H:%M %Z") if last else t("尚無紀錄")
+        if row["enabled"] and row.get("status") == "ok" and last and time.time() - last >= device_settings.stale_after(self.prefs["interval"]):
+            status = "已過期"
+        metrics = " · ".join(f'{escape(str(m["label"]))} {escape(str(m["value"]))}' for m in row.get("metrics", []))
+        state_action = "disable" if row["enabled"] else "enable"
+        state_label = t("停用" if row["enabled"] else "啟用")
+        toggle = (f'<form method="post" action="/{state_action}/{provider}"><button class="text">{state_label}</button></form>'
+                  if configured and info["credential"] else "")
+        edit = ("更新憑證" if configured else "設定憑證") if info["credential"] else "服務資訊"
+        error = row.get("error")
+        note = t(error if error in ENGLISH else "用量暫時無法取得") if error else ""
+        return f"""<article><div><h2>{escape(info["name"])}</h2><b class="metrics">{metrics}</b>
+<p>{t(status)} · {t("最後成功")} {escape(when)}</p><p>{escape(note)}</p></div><div class="actions">
+<a href="/account/{provider}">{t(edit)}</a>{toggle}
+<details><summary>{t("移除")}</summary><form method="post" action="/remove/{provider}"><button class="text danger">{t("確認移除帳號")}</button></form>
 </details></div></article>"""
 
+    def dashboard(self, rows, notice=""):
+        t = self.text
+        present = {r["provider"] for r in rows}
+        cards = "".join(self.account_row(r) for r in rows if r["provider"] in PROVIDERS)
+        if not cards:
+            cards = f'<p>{t("尚未設定帳號。請從下方選擇服務。")}</p>'
+        choices = "".join(f'<option value="{k}">{escape(p["name"])}</option>'
+                          for k, p in PROVIDERS.items() if k not in present and p["credential"])
+        add = (f'<form action="/choose" method="get" class="add"><label>{t("服務")}<select name="provider">{choices}</select></label>'
+               f'<button>{t("設定帳號")}</button></form>') if choices else f'<p>{t("可設定的服務均已加入。")}</p>'
+        unsupported = "".join(f'<p><strong>{escape(p["name"])}</strong>　{escape(t(p["hint"]))}</p>'
+                              for p in PROVIDERS.values() if not p["credential"])
+        flash = f'<p class="notice" role="status">{t(notice)}</p>' if notice else ""
+        intro = t("用量由 Raspberry Pi 每 {duration}更新。").format(duration=self.minutes(self.prefs["interval"]))
+        return self.page("訂閱管理", f"""<h1>{t("訂閱管理")}</h1><p class="intro">{intro}</p>
+{flash}<section aria-label="{t("已設定的帳號")}">{cards}</section><section class="extra"><h2>{t("新增服務")}</h2>
+{add}{unsupported}</section>""", "/")
 
-def dashboard(rows, notice=""):
-    present = {r["provider"] for r in rows}
-    cards = "".join(account_row(r) for r in rows if r["provider"] in PROVIDERS)
-    if not cards:
-        cards = "<p>尚未設定帳號。請從下方選擇服務。</p>"
-    choices = "".join(f'<option value="{k}">{escape(p["name"])}</option>'
-                      for k, p in PROVIDERS.items() if k not in present and p["credential"])
-    add = (f'<form action="/choose" method="get" class="add"><label>服務<select name="provider">{choices}</select></label>'
-           '<button>設定帳號</button></form>') if choices else "<p>可設定的服務均已加入。</p>"
-    unsupported = "".join(f'<p><strong>{escape(p["name"])}</strong>　{escape(p["hint"])}</p>'
-                          for p in PROVIDERS.values() if not p["credential"])
-    flash = f'<p class="notice" role="status">{notice}</p>' if notice else ""
-    return page("訂閱管理", f"""<h1>訂閱管理</h1><p class="intro">用量由 Raspberry Pi 每 5 分鐘更新。</p>
-{flash}<section aria-label="已設定的帳號">{cards}</section><section class="extra"><h2>新增服務</h2>
-{add}{unsupported}</section>""", True)
+    def settings_page(self, saved=False, error=""):
+        t = self.text
+        def option(value, title, current):
+            selected = " selected" if value == current else ""
+            return f'<option value="{value}"{selected}>{title}</option>'
+        languages = "".join(option(k, label, self.language) for k, label in (("zh-Hant", "繁體中文"), ("en", "English")))
+        intervals = "".join(option(i, self.minutes(i), self.prefs["interval"])
+                            for i in device_settings.INTERVALS)
+        notice = f'<p class="notice" role="status">{t("已儲存本機設定。")}</p>' if saved else ""
+        if error:
+            notice = f'<p role="alert">{t(error)}</p>'
+        return self.page("本機設定", f"""<section class="preferences"><h1>{t("本機設定")}</h1>{notice}
+<form method="post" action="/settings"><label>{t("語言")}<select name="language" aria-label="{t("語言")}">{languages}</select></label>
+<label>{t("時區")}<input name="timezone" list="time-zones" value="{escape(self.prefs["timezone"])}" maxlength="100"
+aria-describedby="zone-help" required></label><small id="zone-help">{t("選擇或輸入 IANA 時區，例如 Asia/Taipei。")}</small>
+<datalist id="time-zones">{zone_options()}</datalist>
+<label>{t("更新頻率")}<select name="interval" aria-label="{t("更新頻率")}" aria-describedby="interval-help">{intervals}</select></label>
+<small id="interval-help">{t("電子紙兩次刷新至少間隔 3 分鐘。")}</small><button>{t("儲存設定")}</button>
+</form></section>""", "/settings")
 
 
 class WebServer(ThreadingHTTPServer):
@@ -239,6 +296,12 @@ class WebServer(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
+    @property
+    def screens(self):
+        if not hasattr(self, "_screens"):
+            self._screens = Screens(device_settings.load(self.server.home))
+        return self._screens
+
     def log_message(self, *_):
         pass
 
@@ -248,6 +311,10 @@ class Handler(BaseHTTPRequestHandler):
         return len(hosts) == 1 and hosts[0].lower() in {f"{h}:{self.server.server_port}" for h in allowed}
 
     def send(self, status, body="", headers=(), mime="text/html; charset=utf-8"):
+        errors = {400: "無法處理這個要求。", 403: "未授權的要求。", 404: "找不到這個頁面。",
+                  413: "表單資料過大。", 415: "不支援的表單格式。"}
+        if not body and status in errors:
+            body = self.screens.text(errors[status])
         raw = body.encode()
         self.send_response(status)
         self.send_header("Content-Type", mime)
@@ -289,24 +356,26 @@ class Handler(BaseHTTPRequestHandler):
             if (self.server.home / "admin-password.json").exists():
                 return self.redirect("/")
             issue_setup_code(self.server.home, display=True)
-            return self.send(200, auth_page(True))
+            return self.send(200, self.screens.auth_page(True))
         if not self.signed_in():
             if not (self.server.home / "admin-password.json").exists():
                 return self.redirect("/setup")
-            return self.send(200, auth_page())
+            return self.send(200, self.screens.auth_page())
+        if self.path in ("/settings", "/settings?saved=1"):
+            return self.send(200, self.screens.settings_page(saved=self.path.endswith("?saved=1")))
         if self.path == "/" or self.path in NOTICES:
             try:
                 rows = self.server.store_factory().list_accounts()
             except (OSError, ValueError, sqlite3.DatabaseError):
-                return self.send(503, "暫時無法讀取帳號資料。")
-            return self.send(200, dashboard(rows, NOTICES.get(self.path, "")))
+                return self.send(503, self.screens.text("暫時無法讀取帳號資料。"))
+            return self.send(200, self.screens.dashboard(rows, NOTICES.get(self.path, "")))
         parts = urlsplit(self.path)
         if parts.path == "/choose":
             choices = parse_qs(parts.query).get("provider", [])
             if len(choices) == 1 and choices[0] in PROVIDERS:
                 return self.redirect("/account/" + choices[0])
         if self.path.startswith("/account/") and self.path[9:] in PROVIDERS:
-            return self.send(200, account_form(self.path[9:]))
+            return self.send(200, self.screens.account_form(self.path[9:]))
         return self.send(404)
 
     def do_POST(self):
@@ -333,6 +402,14 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/logout":
                 self.server.session = ""
                 return self.redirect("/", "")
+            if self.path == "/settings":
+                try:
+                    device_settings.save(self.server.home, form["timezone"], form["language"], int(form["interval"]))
+                except (ValueError, KeyError):
+                    return self.send(400, self.screens.settings_page(error="請確認時區、語言和更新頻率皆為有效選項。"))
+                except OSError:
+                    return self.send(503, self.screens.settings_page(error="目前無法儲存本機設定。"))
+                return self.redirect("/settings?saved=1")
             route, _, provider = self.path[1:].partition("/")
             if provider not in PROVIDERS or (route != "remove" and not PROVIDERS[provider]["credential"]):
                 return self.send(400)
@@ -341,7 +418,7 @@ class Handler(BaseHTTPRequestHandler):
                 if route == "account":
                     secret = form.get("secret", "")
                     if not 1 <= len(secret) <= 16384 or not all(33 <= ord(c) <= 126 for c in secret):
-                        return self.send(400, "憑證必須是單行且不含空白。")
+                        return self.send(400, self.screens.text("憑證必須是單行且不含空白。"))
                     store.set_account(provider, secret)
                     return self.redirect("/saved")
                 if route in ("enable", "disable"):
@@ -351,9 +428,9 @@ class Handler(BaseHTTPRequestHandler):
                     store.remove_account(provider)
                     return self.redirect("/removed")
             except (ValueError, KeyError):
-                return self.send(400, "無法套用設定，請確認帳號與憑證。")
+                return self.send(400, self.screens.text("無法套用設定，請確認帳號與憑證。"))
             except (OSError, sqlite3.DatabaseError):
-                return self.send(503, "暫時無法儲存帳號資料。")
+                return self.send(503, self.screens.text("暫時無法儲存帳號資料。"))
             return self.send(404)
 
     def authenticate(self, form):
@@ -361,18 +438,18 @@ class Handler(BaseHTTPRequestHandler):
         now = time.monotonic()
         self.server.failures = [stamp for stamp in self.server.failures if now - stamp < 60]
         if len(self.server.failures) >= 5:
-            return self.send(429, auth_page(setup, "嘗試次數過多，請在一分鐘後再試。"))
+            return self.send(429, self.screens.auth_page(setup, "嘗試次數過多，請在一分鐘後再試。"))
         password = form.get("password", "")
         if setup:
             if not 12 <= len(password) <= 256 or password != form.get("confirm"):
-                return self.send(400, auth_page(True, "請輸入相同的兩次管理密碼，長度為 12 至 256 字元。"))
+                return self.send(400, self.screens.auth_page(True, "請輸入相同的兩次管理密碼，長度為 12 至 256 字元。"))
             valid = redeem(self.server.home, form.get("code", ""), password)
         else:
             auth = read_json(self.server.home / "admin-password.json")
             valid = auth and 1 <= len(password) <= 256 and hmac.compare_digest(password_hash(password, auth["salt"]), auth["hash"])
         if not valid:
             self.server.failures.append(now)
-            return self.send(401, auth_page(setup, "憑證不正確或設定碼已失效。"))
+            return self.send(401, self.screens.auth_page(setup, "憑證不正確或設定碼已失效。"))
         self.server.failures.clear()
         self.server.session = secrets.token_urlsafe(32)
         self.server.expires = now + SESSION_SECONDS

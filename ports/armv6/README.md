@@ -1,6 +1,6 @@
 # Quota Desk · Raspberry Pi Zero W
 
-在區域網路用瀏覽器連到 Pi，管理 AI 憑證及查看額度。Pi 每五分鐘自行查詢，Waveshare 2.13 吋黑白電子紙同時顯示 Codex、Gemini 與 DeepSeek。Mac 或手機在設定完可以關機。
+在區域網路用瀏覽器連到 Pi，管理 AI 憑證及查看額度。Pi 預設每五分鐘自行查詢，Waveshare 2.13 吋黑白電子紙同時顯示 Codex、Gemini 與 DeepSeek。Mac 或手機在設定完可以關機。
 
 本目錄是 CodexBar v0.84.0 的 ARMv6 移植分支。用 Raspberry Pi OS Lite 32 位元內建的 Python、SQLite、OpenSSL 和 systemd 執行服務。電子紙另用 Pillow 及 Waveshare SPI 驅動。上游的授權見 [MIT License](../../LICENSE)。
 
@@ -10,6 +10,8 @@
 2. Pi 會產生自己的 HTTPS 憑證。第一次連線，先在瀏覽器的憑證詳細資料比對 SHA-256 開頭 32 個十六進位字元，與電子紙相符再繼續。可另用已配對的金鑰 SSH 核對完整指紋。
 3. 輸入電子紙上的八位數配對碼，設定至少 12 個字元的管理密碼。配對碼十分鐘有效，過期可重開設定頁，待電子紙完成刷新。平日只需管理密碼。單一管理者登入新瀏覽器後，原瀏覽器需要重新登入。
 4. 在「訂閱管理」選擇服務，輸入該服務授權給你的金鑰或存取權杖。下一輪查詢完成後，頁面顯示實際讀值與最後成功時間。可更新憑證、停用或移除帳號，每個服務可設定一組帳號。
+
+登入後開啟「本機設定」，可選擇管理頁和電子紙使用的時區、繁體中文或英文，以及每 1、3、5、10、15、30 或 60 分鐘查詢一次用量。預設為台北時區、繁體中文、每 5 分鐘。儲存後無需重開機，電子紙會在允許的下次刷新時套用。這些設定只作用於 Quota Desk。
 
 | 服務 | 額度來源與限制 |
 |---|---|
@@ -42,7 +44,7 @@ ssh quota-pi 'python3 /usr/local/lib/quota-desk-native/web.py fingerprint'
 | Pi 的 systemd 單元 | 作用 |
 |---|---|
 | `quota-desk-web.service` | 開機提供 HTTPS 管理頁，監聽 TCP 8443。|
-| `quota-desk-collect.timer` | 開機後排程，之後每五分鐘觸發 `quota-desk-collect.service`。收集程式執行完會退出。|
+| `quota-desk-collect.timer` | 開機後每分鐘檢查設定的查詢間隔，到期才向 AI 服務讀取用量。|
 | `quota-desk-display.service` | 開機驅動實體電子紙，兩次全刷至少相隔三分鐘。|
 
 ```sh

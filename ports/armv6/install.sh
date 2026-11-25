@@ -45,7 +45,7 @@ fi
 dest=/usr/local/lib/quota-desk-display
 sudo install -d -m 755 "$dest/waveshare_epd"
 sudo install -m 644 "$tmp_dir"/*.py "$dest/waveshare_epd/"
-sudo install -m 644 "$code_dir/display.py" "$code_dir/receive.py" "$dest/"
+sudo install -m 644 "$code_dir/device_settings.py" "$code_dir/receive.py" "$code_dir/display.py" "$dest/"
 install -d -m 700 "$HOME/.local/share/quota-desk"
 sudo raspi-config nonint do_spi 0
 

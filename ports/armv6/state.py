@@ -1,5 +1,6 @@
-"""Pi 上的帳號資料與每五分鐘更新。電子紙只接收沒有憑證的摘要。"""
+"""Pi 上的帳號資料與可調排程。電子紙只接收沒有憑證的摘要。"""
 from contextlib import closing, contextmanager
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ import sqlite3
 import sys
 import time
 
+import device_settings
 import providers
 import receive
 
@@ -21,6 +23,8 @@ class Store:
         self.home.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.db = self.home / "accounts.sqlite3"
         os.close(os.open(self.db, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600))
+        self.collect_lock = self.home / "collect.lock"
+        os.close(os.open(self.collect_lock, os.O_CREAT | os.O_RDONLY | os.O_NOFOLLOW, 0o600))
         with self.connection() as db:
             if db.execute("PRAGMA user_version").fetchone()[0] == 0:
                 db.execute("BEGIN IMMEDIATE")
@@ -53,6 +57,8 @@ class Store:
                            (provider, row["last_success"], json.dumps(row["metrics"])))
 
     def list_accounts(self):
+        maximum_age = device_settings.stale_after(device_settings.load(self.home)["interval"])
+        now = time.time()
         with self.connection() as db:
             result = []
             for record in db.execute("""SELECT provider, secret IS NOT NULL AS configured, enabled, last_success,
@@ -60,7 +66,7 @@ class Store:
                 row = dict(record)
                 row["metrics"] = json.loads(row["metrics"])
                 row["configured"], row["enabled"] = bool(row["configured"]), bool(row["enabled"])
-                if row["status"] == "ok" and not -60 <= time.time() - row["last_success"] < 900:
+                if row["status"] == "ok" and not -60 <= now - row["last_success"] < maximum_age:
                     row["status"] = "stale"
                 result.append(row)
             return result
@@ -90,9 +96,43 @@ class Store:
         with self.connection() as db:
             db.execute("DELETE FROM accounts WHERE provider=?", (provider,))
 
-    def collect(self):
-        with self.connection() as db:
-            accounts = db.execute("SELECT provider, secret, revision FROM accounts WHERE enabled=1").fetchall()
+    def collect(self, scheduled=False):
+        with self.collect_lock.open("rb") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return False
+            clock_file = self.home / "last-attempt.json"
+            boot = receive.boot_id()
+            if scheduled:
+                interval = device_settings.load(self.home)["interval"] * 60
+                try:
+                    clock = json.loads(clock_file.read_bytes())
+                    if boot and clock["boot"] == boot:
+                        elapsed = time.monotonic() - clock["monotonic"]
+                    elif not boot and clock["boot"] is None:
+                        elapsed = time.time() - clock["wall"]
+                    else:
+                        elapsed = interval
+                except (FileNotFoundError, ValueError, TypeError, KeyError):
+                    elapsed = interval
+                if 0 <= elapsed < interval:
+                    remaining = interval - elapsed
+                    if remaining > 5:
+                        self.publish(only_if_changed=True)
+                        return False
+                    # A slightly early minute tick can wait its last few seconds instead of losing a whole minute.
+                    time.sleep(remaining)
+            with self.connection() as db:
+                accounts = db.execute("SELECT provider, secret, revision FROM accounts WHERE enabled=1").fetchall()
+            if accounts:
+                clock = {"boot": boot, "monotonic": time.monotonic(), "wall": time.time()}
+                receive.atomic_write(clock_file, json.dumps(clock).encode())
+                self._query(accounts)
+            self.publish(only_if_changed=not accounts)
+            return bool(accounts)
+
+    def _query(self, accounts):
         for provider, secret, revision in accounts:
             try:
                 metrics = providers.fetch(provider, secret)
@@ -113,9 +153,8 @@ class Store:
                     db.execute("""UPDATE accounts SET error=?,
                                 status=CASE WHEN last_success IS NULL THEN 'unavailable' ELSE 'stale' END
                                 WHERE provider=? AND revision=? AND enabled=1""", (message, provider, revision))
-        self.publish()
 
-    def publish(self):
+    def publish(self, only_if_changed=False):
         accounts = {row["provider"]: row for row in self.list_accounts()}
         now = int(time.time())
         rows = []
@@ -123,11 +162,22 @@ class Store:
             row = accounts.get(provider, {})
             rows.append(dict(id=ident, source=source, last_success=row.get("last_success"),
                              metrics=row.get("metrics", []), status=row.get("status", "unavailable")))
+        path = self.home / "summary.json"
+        if only_if_changed:
+            try:
+                with path.open("rb") as stream:
+                    if receive.decode(stream.read(receive.LIMIT + 1))["services"] == rows:
+                        return
+            except FileNotFoundError:
+                if not any(row["last_success"] for row in rows):
+                    return
+            except (ValueError, RecursionError):
+                pass
         raw = json.dumps(dict(version=1, updated_at=now, services=rows), separators=(",", ":")).encode()
-        receive.save(raw, self.home / "summary.json", receive.boot_id(), time.monotonic())
+        receive.save(raw, path, receive.boot_id(), time.monotonic())
 
 
 if __name__ == "__main__":
     if sys.argv[1:] != ["collect"]:
         sys.exit("用法：state.py collect")
-    Store().collect()
+    Store().collect(scheduled=os.environ.get("TRIGGER_UNIT") == "quota-desk-collect.timer")

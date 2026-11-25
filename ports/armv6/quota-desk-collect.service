@@ -5,11 +5,13 @@ RequiresMountsFor=@HOME@/.local/share/quota-desk
 
 [Service]
 Type=oneshot
+# systemd supplies TRIGGER_UNIT on timer activation. A manual start forces a refresh.
 User=@ACCOUNT@
 WorkingDirectory=/usr/local/lib/quota-desk-native
 Environment=QUOTA_DESK_HOME=@HOME@/.local/share/quota-desk
 Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/usr/bin/python3 /usr/local/lib/quota-desk-native/state.py collect
+LogLevelMax=warning
 TimeoutStartSec=4min
 UMask=0077
 NoNewPrivileges=yes
